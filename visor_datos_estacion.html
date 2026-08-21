@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Visor de datos - Estación Meteorológica (pending.csv)</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  .contenedor {
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.4rem;
+    margin-bottom: 4px;
+  }
+  p.subtitulo {
+    color: var(--muted);
+    margin-top: 0;
+    margin-bottom: 20px;
+    font-size: 0.9rem;
+  }
+  .caja-carga {
+    background: var(--panel);
+    border: 2px dashed var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    text-align: center;
+    margin-bottom: 20px;
+    transition: border-color 0.15s;
+  }
+  .caja-carga.arrastrando {
+    border-color: var(--accent);
+  }
+  .caja-carga input[type="file"] {
+    display: none;
+  }
+  .boton {
+    display: inline-block;
+    background: var(--accent);
+    color: #0f172a;
+    font-weight: 600;
+    padding: 10px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    border: none;
+    font-size: 0.95rem;
+  }
+  .boton:hover { opacity: 0.9; }
+  .boton.secundario {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  #estado {
+    color: var(--muted);
+    font-size: 0.85rem;
+    margin-top: 10px;
+  }
+  .resumen {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  .tarjeta {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 18px;
+    min-width: 140px;
+  }
+  .tarjeta .valor {
+    font-size: 1.4rem;
+    font-weight: 700;
+  }
+  .tarjeta .etiqueta {
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border-radius: 10px;
+    overflow: hidden;
+    font-size: 0.85rem;
+  }
+  thead th {
+    background: #253449;
+    text-align: left;
+    padding: 10px 12px;
+    color: var(--muted);
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+  }
+  tbody td {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+  }
+  tbody tr:hover {
+    background: #24344a;
+  }
+  .estimado {
+    color: var(--warn);
+    font-weight: 700;
+  }
+  .tabla-wrap {
+    max-height: 500px;
+    overflow-y: auto;
+    border-radius: 10px;
+  }
+  .leyenda {
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin-top: 10px;
+  }
+  .barra-acciones {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 16px 0 10px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .error {
+    color: #f87171;
+    font-size: 0.85rem;
+    margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="contenedor">
+  <h1>📡 Visor de datos — Estación Meteorológica</h1>
+  <p class="subtitulo">
+    Decodifica el archivo <code>pending.csv</code> guardado en la microSD. Todo se procesa
+    en tu navegador — el archivo no se sube a ningún servidor.
+  </p>
+
+  <div class="caja-carga" id="cajaCarga">
+    <label class="boton" for="entradaArchivo">Seleccionar pending.csv</label>
+    <input type="file" id="entradaArchivo" accept=".csv,.txt">
+    <div id="estado">o arrastra el archivo aquí</div>
+    <div class="error" id="mensajeError"></div>
+  </div>
+
+  <div id="resultados" style="display:none;">
+    <div class="resumen" id="resumen"></div>
+
+    <div class="barra-acciones">
+      <span class="leyenda">Los valores en <span class="estimado">amarillo (*)</span> fueron estimados, no medidos directamente.</span>
+      <button class="boton secundario" id="botonDescargar">Descargar CSV decodificado</button>
+    </div>
+
+    <div class="tabla-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Tiempo desde arranque</th>
+            <th>Temp °C</th>
+            <th>Hum %</th>
+            <th>Presión hPa</th>
+            <th>Viento km/h</th>
+            <th>Dirección °</th>
+            <th>Lluvia mm</th>
+            <th>PM1.0</th>
+            <th>PM2.5</th>
+            <th>PM10</th>
+          </tr>
+        </thead>
+        <tbody id="cuerpoTabla"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+  Decodificación del payload de 20 bytes (idéntica al firmware):
+  byte  0-1  : temperatura *10   (int16, °C)
+  byte  2    : humedad *2        (uint8, %)
+  byte  3-4  : presión *10       (uint16, hPa)
+  byte  5-6  : viento *10        (uint16, km/h)
+  byte  7-8  : dirección viento  (uint16, grados)
+  byte  9-10 : lluvia *100       (uint16, mm)
+  byte  11   : flags de estimación (bit0=viento, bit1=lluvia, bit2=PM)
+  byte  12-14: reservado
+  byte  15   : PM1.0  (uint8)
+  byte  16   : PM2.5  (uint8)
+  byte  17   : PM10   (uint8)
+  byte  18-19: reservado
+*/
+
+function hexABytes(hex) {
+  const limpio = hex.trim();
+  const bytes = new Uint8Array(limpio.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(limpio.substr(i * 2, 2), 16);
+  }
+  return bytes;
+}
+
+function int16BigEndianConSigno(hi, lo) {
+  let valor = (hi << 8) | lo;
+  if (valor & 0x8000) valor -= 0x10000;
+  return valor;
+}
+
+function uint16BigEndian(hi, lo) {
+  return (hi << 8) | lo;
+}
+
+function formatearMillis(ms) {
+  const totalSeg = Math.floor(ms / 1000);
+  const h = Math.floor(totalSeg / 3600);
+  const m = Math.floor((totalSeg % 3600) / 60);
+  const s = totalSeg % 60;
+  return `${h}h ${m}m ${s}s`;
+}
+
+function decodificarPayload(hexStr) {
+  const bytes = hexABytes(hexStr);
+  if (bytes.length !== 20) {
+    throw new Error(`Se esperaban 20 bytes, se recibieron ${bytes.length}`);
+  }
+
+  const temp10 = int16BigEndianConSigno(bytes[0], bytes[1]);
+  const hum2 = bytes[2];
+  const pres10 = uint16BigEndian(bytes[3], bytes[4]);
+  const wind10 = uint16BigEndian(bytes[5], bytes[6]);
+  const direccion = uint16BigEndian(bytes[7], bytes[8]);
+  const rain100 = uint16BigEndian(bytes[9], bytes[10]);
+  const flags = bytes[11];
+  const pm1_0 = bytes[15];
+  const pm2_5 = bytes[16];
+  const pm10 = bytes[17];
+
+  return {
+    temperatura: temp10 / 10,
+    humedad: hum2 / 2,
+    presion: pres10 / 10,
+    viento: wind10 / 10,
+    vientoEstimado: !!(flags & 0x01),
+    direccion,
+    lluvia: rain100 / 100,
+    lluviaEstimada: !!(flags & 0x02),
+    pm1_0,
+    pm2_5,
+    pm10,
+    pmEstimado: !!(flags & 0x04),
+  };
+}
+
+function procesarTexto(texto) {
+  const lineas = texto.split(/\r?\n/).filter(l => l.trim().length > 0);
+  const registros = [];
+  let errores = 0;
+
+  lineas.forEach((linea, idx) => {
+    const partes = linea.split(',');
+    if (partes.length < 2) { errores++; return; }
+    const ms = parseInt(partes[0].trim(), 10);
+    const hex = partes[1].trim();
+    try {
+      const datos = decodificarPayload(hex);
+      datos.linea = idx + 1;
+      datos.millis = ms;
+      datos.tiempo = formatearMillis(ms);
+      registros.push(datos);
+    } catch (e) {
+      errores++;
+    }
+  });
+
+  return { registros, errores };
+}
+
+function celda(valor, esEstimado, decimales) {
+  const texto = typeof valor === 'number' ? valor.toFixed(decimales) : valor;
+  return esEstimado
+    ? `<span class="estimado">${texto} *</span>`
+    : texto;
+}
+
+function renderizar(registros) {
+  const cuerpo = document.getElementById('cuerpoTabla');
+  cuerpo.innerHTML = '';
+
+  registros.forEach(r => {
+    const fila = document.createElement('tr');
+    fila.innerHTML = `
+      <td>${r.linea}</td>
+      <td>${r.tiempo}</td>
+      <td>${celda(r.temperatura, false, 1)}</td>
+      <td>${celda(r.humedad, false, 0)}</td>
+      <td>${celda(r.presion, false, 1)}</td>
+      <td>${celda(r.viento, r.vientoEstimado, 1)}</td>
+      <td>${r.direccion}</td>
+      <td>${celda(r.lluvia, r.lluviaEstimada, 2)}</td>
+      <td>${celda(r.pm1_0, r.pmEstimado, 0)}</td>
+      <td>${celda(r.pm2_5, r.pmEstimado, 0)}</td>
+      <td>${celda(r.pm10, r.pmEstimado, 0)}</td>
+    `;
+    cuerpo.appendChild(fila);
+  });
+
+  const resumen = document.getElementById('resumen');
+  const totalEstimados = registros.filter(r => r.vientoEstimado || r.lluviaEstimada || r.pmEstimado).length;
+  resumen.innerHTML = `
+    <div class="tarjeta"><div class="valor">${registros.length}</div><div class="etiqueta">Registros</div></div>
+    <div class="tarjeta"><div class="valor">${totalEstimados}</div><div class="etiqueta">Con algún dato estimado</div></div>
+  `;
+
+  document.getElementById('resultados').style.display = 'block';
+}
+
+let registrosActuales = [];
+
+function manejarArchivo(archivo) {
+  const errorDiv = document.getElementById('mensajeError');
+  errorDiv.textContent = '';
+
+  if (!archivo) return;
+
+  const lector = new FileReader();
+  lector.onload = (e) => {
+    try {
+      const { registros, errores } = procesarTexto(e.target.result);
+      if (registros.length === 0) {
+        errorDiv.textContent = 'No se encontraron registros válidos en el archivo.';
+        return;
+      }
+      registrosActuales = registros;
+      renderizar(registros);
+      document.getElementById('estado').textContent =
+        `${archivo.name} — ${registros.length} registros cargados` +
+        (errores > 0 ? ` (${errores} líneas con error, omitidas)` : '');
+    } catch (err) {
+      errorDiv.textContent = 'Error al leer el archivo: ' + err.message;
+    }
+  };
+  lector.readAsText(archivo);
+}
+
+document.getElementById('entradaArchivo').addEventListener('change', (e) => {
+  manejarArchivo(e.target.files[0]);
+});
+
+const cajaCarga = document.getElementById('cajaCarga');
+cajaCarga.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  cajaCarga.classList.add('arrastrando');
+});
+cajaCarga.addEventListener('dragleave', () => {
+  cajaCarga.classList.remove('arrastrando');
+});
+cajaCarga.addEventListener('drop', (e) => {
+  e.preventDefault();
+  cajaCarga.classList.remove('arrastrando');
+  if (e.dataTransfer.files.length > 0) {
+    manejarArchivo(e.dataTransfer.files[0]);
+  }
+});
+
+document.getElementById('botonDescargar').addEventListener('click', () => {
+  if (registrosActuales.length === 0) return;
+  const encabezado = 'linea,tiempo,temperatura_C,humedad_%,presion_hPa,viento_kmh,viento_estimado,direccion_grados,lluvia_mm,lluvia_estimada,pm1_0,pm2_5,pm10,pm_estimado\n';
+  const filas = registrosActuales.map(r => [
+    r.linea, r.tiempo, r.temperatura, r.humedad, r.presion,
+    r.viento, r.vientoEstimado, r.direccion, r.lluvia, r.lluviaEstimada,
+    r.pm1_0, r.pm2_5, r.pm10, r.pmEstimado
+  ].join(',')).join('\n');
+
+  const blob = new Blob([encabezado + filas], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const enlace = document.createElement('a');
+  enlace.href = url;
+  enlace.download = 'datos_decodificados.csv';
+  enlace.click();
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
