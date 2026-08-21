@@ -1,0 +1,163 @@
+"""
+Decodificador de /pending.csv (respaldo microSD de la estación meteorológica)
+--------------------------------------------------------------------------
+Uso:
+    python decodificar_pending.py pending.csv
+    python decodificar_pending.py pending.csv --salida datos_decodificados.csv
+
+Formato de cada línea en pending.csv:
+    millis,hexpayload
+
+El payload son 20 bytes (40 caracteres hex) armados así:
+    byte  0-1  : temperatura *10   (int16, °C)
+    byte  2    : humedad *2        (uint8, %)
+    byte  3-4  : presión *10       (uint16, hPa)
+    byte  5-6  : viento *10        (uint16, km/h)
+    byte  7-8  : dirección viento  (uint16, grados)
+    byte  9-10 : lluvia *100       (uint16, mm)
+    byte  11   : flags de estimación
+                   bit0 = viento estimado
+                   bit1 = lluvia estimada
+                   bit2 = PM estimado
+    byte  12-14: reservado (sin uso actualmente)
+    byte  15   : PM1.0  (uint8, µg/m³)
+    byte  16   : PM2.5  (uint8, µg/m³)
+    byte  17   : PM10   (uint8, µg/m³)
+    byte  18-19: reservado (sin uso actualmente)
+"""
+
+import argparse
+import csv
+import struct
+import sys
+from datetime import timedelta
+
+
+def decodificar_payload(hex_str: str) -> dict:
+    payload = bytes.fromhex(hex_str)
+    if len(payload) != 20:
+        raise ValueError(f"Se esperaban 20 bytes, se recibieron {len(payload)}")
+
+    # ">h" = int16 big-endian (temperatura puede ser negativa)
+    (temp10,) = struct.unpack(">h", payload[0:2])
+    hum2 = payload[2]
+    (pres10,) = struct.unpack(">H", payload[3:5])
+    (wind10,) = struct.unpack(">H", payload[5:7])
+    (direccion,) = struct.unpack(">H", payload[7:9])
+    (rain100,) = struct.unpack(">H", payload[9:11])
+    flags = payload[11]
+    pm1_0 = payload[15]
+    pm2_5 = payload[16]
+    pm10 = payload[17]
+
+    return {
+        "temperatura_C": temp10 / 10.0,
+        "humedad_%": hum2 / 2.0,
+        "presion_hPa": pres10 / 10.0,
+        "viento_kmh": wind10 / 10.0,
+        "viento_estimado": bool(flags & 0x01),
+        "direccion_grados": direccion,
+        "lluvia_mm": rain100 / 100.0,
+        "lluvia_estimada": bool(flags & 0x02),
+        "pm1_0_ugm3": pm1_0,
+        "pm2_5_ugm3": pm2_5,
+        "pm10_ugm3": pm10,
+        "pm_estimado": bool(flags & 0x04),
+    }
+
+
+def formatear_millis(ms: int) -> str:
+    """millis() es el tiempo desde el último arranque del ESP32,
+    no una fecha real. Se muestra como duración relativa."""
+    return str(timedelta(milliseconds=ms))
+
+
+def procesar_archivo(ruta_entrada: str, ruta_salida: str | None):
+    filas = []
+    errores = 0
+
+    with open(ruta_entrada, "r", encoding="utf-8") as f:
+        lector = csv.reader(f)
+        for i, linea in enumerate(lector, start=1):
+            if not linea or len(linea) < 2:
+                continue
+            millis_str, hex_str = linea[0].strip(), linea[1].strip()
+            try:
+                ms = int(millis_str)
+                datos = decodificar_payload(hex_str)
+                datos["linea"] = i
+                datos["millis_desde_arranque"] = ms
+                datos["tiempo_desde_arranque"] = formatear_millis(ms)
+                filas.append(datos)
+            except (ValueError, IndexError) as e:
+                errores += 1
+                print(f"⚠️ Línea {i} inválida, se omite ({e})", file=sys.stderr)
+
+    if not filas:
+        print("No se encontraron registros válidos.")
+        return
+
+    # ---- Mostrar en pantalla ----
+    print(f"\n{len(filas)} registros decodificados ({errores} con error)\n")
+    print(f"{'#':<4}{'Tiempo':<14}{'Temp°C':<8}{'Hum%':<6}{'Presión':<9}"
+          f"{'Viento':<10}{'Dir°':<6}{'Lluvia':<10}{'PM2.5':<8}{'Flags*'}")
+    print("-" * 95)
+    for d in filas:
+        marcas = []
+        if d["viento_estimado"]:
+            marcas.append("viento")
+        if d["lluvia_estimada"]:
+            marcas.append("lluvia")
+        if d["pm_estimado"]:
+            marcas.append("PM")
+        flags_txt = ",".join(marcas) if marcas else "-"
+
+        print(
+            f"{d['linea']:<4}"
+            f"{d['tiempo_desde_arranque']:<14}"
+            f"{d['temperatura_C']:<8.1f}"
+            f"{d['humedad_%']:<6.0f}"
+            f"{d['presion_hPa']:<9.1f}"
+            f"{d['viento_kmh']:<9.1f}{'*' if d['viento_estimado'] else ' '}"
+            f"{d['direccion_grados']:<6}"
+            f"{d['lluvia_mm']:<9.2f}{'*' if d['lluvia_estimada'] else ' '}"
+            f"{d['pm2_5_ugm3']:<7}{'*' if d['pm_estimado'] else ' '}"
+            f"  {flags_txt}"
+        )
+
+    print("\n(*) = valor estimado, no medido directamente por el sensor.")
+
+    # ---- Guardar CSV decodificado (opcional) ----
+    if ruta_salida:
+        campos = [
+            "linea", "millis_desde_arranque", "tiempo_desde_arranque",
+            "temperatura_C", "humedad_%", "presion_hPa",
+            "viento_kmh", "viento_estimado",
+            "direccion_grados",
+            "lluvia_mm", "lluvia_estimada",
+            "pm1_0_ugm3", "pm2_5_ugm3", "pm10_ugm3", "pm_estimado",
+        ]
+        with open(ruta_salida, "w", newline="", encoding="utf-8") as f:
+            escritor = csv.DictWriter(f, fieldnames=campos)
+            escritor.writeheader()
+            for d in filas:
+                escritor.writerow({k: d[k] for k in campos})
+        print(f"\n✅ CSV decodificado guardado en: {ruta_salida}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Decodifica el respaldo pending.csv de la estación meteorológica."
+    )
+    parser.add_argument("entrada", help="Ruta al archivo pending.csv de la microSD")
+    parser.add_argument(
+        "--salida", "-o",
+        help="Ruta donde guardar el CSV ya decodificado (opcional)",
+        default=None,
+    )
+    args = parser.parse_args()
+    procesar_archivo(args.entrada, args.salida)
+
+
+if __name__ == "__main__":
+    main()
